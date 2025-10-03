@@ -1,0 +1,117 @@
+1. Остановить контейнер
+
+docker stop alloydb-omni
+
+2. Создать каталоги для AlloyDB/Postgres на хосте
+
+mkdir -p /opt/alloydb-native/bin
+mkdir -p /opt/alloydb-native/lib
+mkdir -p /opt/alloydb-native/share
+
+3. Вытащить из контейнера бинарники и библиотеки
+
+docker cp alloydb-omni:/usr/lib/postgresql/16/bin/. /opt/alloydb-native/bin/
+docker cp alloydb-omni:/usr/lib/postgresql/16/lib/. /opt/alloydb-native/lib/
+
+4. Вытащить share-файлы (важно: не только /16/, но и родительские файлы)
+
+docker cp alloydb-omni:/usr/share/postgresql/16/. /opt/alloydb-native/share/
+docker cp alloydb-omni:/usr/share/postgresql/postgresql.conf.sample /opt/alloydb-native/share/
+
+5. Проверить зависимости (наличие .so)
+
+ldd /opt/alloydb-native/bin/postgres | grep "not found"
+ldd /opt/alloydb-native/bin/initdb | grep "not found"
+
+    Если будет "not found" — ищи и копируй эти .so из контейнера.
+
+6. Создать data_dir и выдать права
+
+mkdir -p /srv/alloydb-ha/alloydb-data
+chown root:root /srv/alloydb-ha/alloydb-data
+chmod 700 /srv/alloydb-ha/alloydb-data
+
+7. Создать runtime-dir для сокетов и lock-файлов
+
+sudo mkdir -p /var/run/postgresql
+sudo chown root /var/run/postgresql
+chmod 775 /var/run/postgresql
+
+8. Экспортировать LD_LIBRARY_PATH
+
+(делать перед всеми следующими командами под своим юзером, если не прописано в systemd Environment)
+
+export LD_LIBRARY_PATH=/opt/alloydb-native/lib
+
+9. Инициализировать базу initdb
+
+/opt/alloydb-native/bin/initdb -D /srv/alloydb-ha/alloydb-data -U postgres -A md5 --pwfile=<(echo "mysecretpassword") -L /opt/alloydb-native/share
+
+10. Проверить и, если нужно, поправить конфиг:
+
+    В файле /srv/alloydb-ha/alloydb-data/postgresql.conf
+
+    listen_addresses = '*'
+    unix_socket_directories = '/var/run/postgresql'
+
+11. Первый тестовый запуск вручную (для дебага)
+
+/opt/alloydb-native/bin/pg_ctl -D /srv/alloydb-ha/alloydb-data -l ~/alloydb.log start
+
+или (для прямого вывода ошибок)
+
+/opt/alloydb-native/bin/postgres -D /srv/alloydb-ha/alloydb-data
+
+    Если есть ошибки — анализируешь логи и исправляешь, повторяешь шаги выше.
+
+12. Создать systemd unit для AlloyDB:
+
+Файл /etc/systemd/system/alloydb.service
+
+[Unit]
+Description=AlloyDB Omni Standalone
+After=network.target
+
+[Service]
+Type=forking
+User=root
+Group=root
+Environment="LD_LIBRARY_PATH=/opt/alloydb-native/lib"
+ExecStart=/opt/alloydb-native/bin/pg_ctl -D /srv/alloydb-ha/alloydb-data -l /var/log/alloydb.log start
+ExecStop=/opt/alloydb-native/bin/pg_ctl -D /srv/alloydb-ha/alloydb-data stop
+PIDFile=/srv/alloydb-ha/alloydb-data/postmaster.pid
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+
+13. Разрешить и запустить сервис:
+
+sudo systemctl daemon-reload
+sudo systemctl enable alloydb
+sudo systemctl start alloydb
+sudo systemctl status alloydb
+
+14. Проверить, что база работает:
+
+sudo systemctl status alloydb
+ps aux | grep postgres
+sudo ss -tlnp | grep 5432
+
+15. Установить клиент (если нет):
+
+sudo apt install postgresql-client
+
+16. Проверить подключение к БД:
+
+psql -h localhost -p 5432 -U postgres
+# пароль: mysecretpassword
+
+или
+
+psql -h /var/run/postgresql -U postgres
+
+Вот и всё!
+
+Весь пошаговый сценарий и все важные команды с нюансами. Если нужна автоматизация в виде shell-скрипта — пиши!
+Если что-то не взлетает — показывай ошибку, и добьём до рабочего состояния на нативе!
